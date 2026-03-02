@@ -7,6 +7,8 @@
 #include "patch/patch.hpp"
 #include "utils/utils.hpp"
 
+// ToolSelectComponent::OnTouchStart
+// Params: this
 // Function Signatures
 REGISTER_GAME_FUNCTION(ToolSelectComponentOnTouchStart,
                        "48 89 5C 24 10 48 89 6C 24 20 56 48 81 EC A0 00 00 00 F3 0F 2C 05 FE 6D 35",
@@ -45,7 +47,20 @@ class QuickbarHotkeys : public patch::BasePatch
   public:
     void apply() const override
     {
+      // With this patch, we add our own custom hotkeys to OnConsoleInput.
+        // While we could be using ArcadeInputComponent here, this conflicts on some keyboard
+        // layouts when using it in conjunction with Extended Hotbar patch as some layouts have the
+        // "/" key as Shift + 7. ArcadeInputComponent does not care if you pressed shift or not, the
+        // keycode will be the same.
+        // We will do our own handling to check if we leak inputs or not.
+
+        // Right now, the patch adds custom keybinds for switching between inventory quickbar slots.
+        // We achieve that by sending ToolSelectComponent a fake "touch" event when we get a key
+        // press on our custom keycode range.
+        // ToolSelectComponents reside in GameMenu -> ItemsParent -> ToolSelectMenu -> ToolX.
+
         auto& game = game::GameHarness::get();
+      // Resolve functions we need.
         real::ToolSelectComponentOnTouchStart =
             game.findMemoryPattern<ToolSelectComponentOnTouchStart_t>(
                 pattern::ToolSelectComponentOnTouchStart);
@@ -75,10 +90,10 @@ class QuickbarHotkeys : public patch::BasePatch
     static void __fastcall OnConsoleInput(VariantList* pVL)
     {
         real::OnConsoleInput(pVL);
-
+        // TODO: Prevent rapid firing.. if we really care about it? Doesn't seem that big of a deal.
         int keyCode = pVL->Get(2).GetUINT32();
 
-        // CTRL + O TOGGLE
+        // CTRL + O TOGGLE, i think this is some broken code but i don't wanna remove it just in case - OOO
         if (keyCode == 79 && GetAsyncKeyState(VK_CONTROL))
 
         {
@@ -96,6 +111,7 @@ class QuickbarHotkeys : public patch::BasePatch
 
                 // Update UI visually
                 Entity* pGUI = real::GetApp()->m_entityRoot->GetEntityByName("GUI");
+              // We don't want the key presses to happen when we can't even see our quickbar.
                 if (pGUI)
                 {
                     Entity* pOptions = pGUI->GetEntityByNameRecursively("OptionsPage");
@@ -119,6 +135,7 @@ class QuickbarHotkeys : public patch::BasePatch
                 return;
 
             Entity* pGUI = real::GetApp()->m_entityRoot->GetEntityByName("GUI");
+          // GUI -> WorldSpecificGUI always exists. GameMenu only does when in a world.
             if (pGUI->GetEntityByName("OptionsMenu") || pGUI->GetEntityByName("ResolutionMenu") ||
                 pGUI->GetEntityByName("OptionsPage"))
                 return;
@@ -127,7 +144,9 @@ class QuickbarHotkeys : public patch::BasePatch
                 pGUI->GetEntityByName("WorldSpecificGUI")->GetEntityByName("GameMenu");
             if (pGameMenu != nullptr)
             {
-                if (keyCode == 48 && m_bStartFrom0)
+              // When GameMenu is constructed, so is the inventory.
+              // We fake a "touch" event on a quickbar Tool to do the item switch cleanly.
+              if (keyCode == 48 && m_bStartFrom0)
                     keyCode = 58;
                 int ToolIndex = keyCode - (m_bStartFrom0 ? 49 : 48);
                 Entity* pTool = pGameMenu->GetEntityByName("ItemsParent")
@@ -154,6 +173,8 @@ class QuickToggleSpaceToPunch : public patch::BasePatch
     void apply() const override
     {
         auto& game = game::GameHarness::get();
+
+      // Resolve functions we need.
         real::AddSpacebarBinding =
             game.findMemoryPattern<AddSpacebarBinding_t>(pattern::AddSpacebarBinding);
 
@@ -170,19 +191,25 @@ class QuickToggleSpaceToPunch : public patch::BasePatch
             if (real::GetApp()->GetGameLogic()->IsDialogOpened())
                 return;
 
-            Entity* pGUI = real::GetApp()->m_entityRoot->GetEntityByName("GUI");
-            if (pGUI->GetEntityByName("OptionsMenu") || pGUI->GetEntityByName("ResolutionMenu") ||
-                pGUI->GetEntityByName("OptionsPage"))
-                return;
-
-            Variant* pVariant = real::GetApp()->GetVar("useSpacebarForPunch");
-            pVariant->Set(pVariant->GetUINT32() == 1 ? 0U : 1U);
-            real::AddSpacebarBinding();
-        }
+          // We only want to act if they key is pressed, not released.
+if (bKeyFired)
+{
+  // Unneccesary code change, sorry! - OOO
+    Entity* pGUI = real::GetApp()->m_entityRoot->GetEntityByName("GUI");
+    // We don't want the key presses to happen when we're still in settings.
+    if (pGUI->GetEntityByName("OptionsMenu") || pGUI->GetEntityByName("ResolutionMenu") ||
+        pGUI->GetEntityByName("OptionsPage"))
+        return;
+    
+    Variant* pVariant = real::GetApp()->GetVar("useSpacebarForPunch");
+    pVariant->Set(pVariant->GetUINT32() == 1 ? 0U : 1U);
+    real::AddSpacebarBinding();
+}
     }
 
     static void AddCustomKeybinds()
     {
+      // CTRL+P
         real::AddKeyBinding(real::GetArcadeComponent(), "chatkey_togglestp", 80, m_stpKeycode, 1,
                             1);
     }
@@ -193,12 +220,14 @@ class QuickToggleSpaceToPunch : public patch::BasePatch
 int QuickToggleSpaceToPunch::m_stpKeycode;
 REGISTER_USER_GAME_PATCH(QuickToggleSpaceToPunch, quick_toggle_space_to_punch);
 
-// --- PATCH 3: URL BUTTON FIX ---
+// --- PATCH 3: URL BUTTON FIX --- ?
 class FixURLButtons : public patch::BasePatch
 {
   public:
     void apply() const override
     {
+      // Yeah... this is kinda broken in vanilla client. If your GDPR status isn't 0 or -1
+        // (uninitialised), you can't open any URL buttons in dialogs.
         auto& game = game::GameHarness::get();
         game.hookFunctionPatternDirect<GenericDialogMenuOnSelect_t>(
             pattern::GenericDialogMenuOnSelect, GenericDialogMenuOnSelect,
@@ -207,6 +236,7 @@ class FixURLButtons : public patch::BasePatch
 
     static void __fastcall GenericDialogMenuOnSelect(VariantList* pVL)
     {
+      // If "gdprState" is >= 1, the game won't even entertain you a popup.
         int gdprState = real::GetApp()->m_playerGDPRState;
         real::GetApp()->m_playerGDPRState = 0;
         real::GenericDialogMenuOnSelect(pVL);
@@ -222,11 +252,14 @@ class ToggleCtrlJump : public patch::BasePatch
     void apply() const override
     {
         auto& game = game::GameHarness::get();
+
+      // Nop out the original key binding, we'll make our own.
         auto ctrlBindAddr = game.findMemoryPattern<uint8_t*>(
             "E8 ? ? ? ? 48 C7 45 07 0F 00 00 00 48 89 5D FF C6 45 EF 00 41 B8 07 00 00 00 48 8D ? "
             "? ? ? ? 48 8D 4D EF E8 ? ? ? ? 89 5C 24 28");
         utils::nopMemory(ctrlBindAddr, 5);
-
+      
+       // Default this to off, some may prefer Ctrl for accessiblity reasons.
         Variant* pVariant = real::GetApp()->GetVar("osgt_qol_toggle_ctrl_jump");
         if (pVariant->GetType() != Variant::TYPE_UINT32)
             pVariant->Set(0U);
@@ -249,10 +282,12 @@ class ToggleCtrlJump : public patch::BasePatch
 
     static void AddCustomKeybinds()
     {
+      // Toggle CTRL to Jump depending on var state.
         if (real::GetApp()->GetVar("osgt_qol_toggle_ctrl_jump")->GetUINT32() == 0)
             real::AddKeyBinding(real::GetArcadeComponent(), "tcj_Jump", 500013, 500056, 0, 0);
         else
         {
+          // Remove the binding if it exists.
             VariantList keyToRemove;
             keyToRemove.m_variant[0].Set("tcj_Jump");
             real::GetArcadeComponent()
@@ -334,8 +369,12 @@ class AllowDialogInput : public patch::BasePatch
     void apply() const override
     {
         auto& game = game::GameHarness::get();
+
+      // Patch out dialog check in NetControllerLocal::OnArcadeInput
         auto p = game.findMemoryPattern<uint8_t*>("74 19 48 8B 07 48 8B CF 48 8B 5C 24 30");
         utils::fillMemory(p, 1, 0xEB);
+
+      // Similarly patch out the StopAllKeys call in GenericDialogMenuCreate
         p = game.findMemoryPattern<uint8_t*>("FF 50 18 F3 0F 10 ? ? ? ? ? E8 ? ? ? ? 0F 28 F0");
         utils::nopMemory(p, 3);
     }
