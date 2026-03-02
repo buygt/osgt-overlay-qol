@@ -4,6 +4,7 @@
 #include "game/struct/graphics/background_blank.hpp"
 #include "game/struct/graphics/background_blood.hpp"
 #include "game/struct/graphics/background_default.hpp"
+#include "game/struct/graphics/surface.hpp"
 #include "patch/patch.hpp"
 #include "utils/utils.hpp"
 
@@ -154,6 +155,9 @@ REGISTER_GAME_FUNCTION(
     WorldRendererOnRender,
     "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 88 48 81 EC 50 01 00 00 48 C7 45 A8 FE FF FF FF",
     __fastcall, void, WorldRenderer*, CL_Vec2f*);
+REGISTER_GAME_FUNCTION(WorldRendererDrawWorldBackground,
+                       "40 57 48 83 EC 40 48 8B F9 48 8B 89 C8 00 00 00 48 85 C9 74 79", __fastcall,
+                       void, WorldRenderer*);
 REGISTER_GAME_FUNCTION(WorldRendererAdvanceSong,
                        "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC F0 00 00 00 48 C7 "
                        "45 8F FE FF FF FF 48 89 58 10",
@@ -1235,11 +1239,15 @@ class AnchorCameraToPlayerPatch : public patch::BasePatch
         // really obvious where the world ends.
         game.hookFunctionPatternDirect<WorldRendererOnRender_t>(
             pattern::WorldRendererOnRender, WorldRendererOnRender, &real::WorldRendererOnRender);
-
+        game.hookFunctionPatternDirect<WorldRendererDrawWorldBackground_t>(
+            pattern::WorldRendererDrawWorldBackground, WorldRendererDrawWorldBackground,
+            &real::WorldRendererDrawWorldBackground);
         // These will default to 0 on new vars.
         m_centerCameraOnPlayer = real::GetApp()->GetVar("osgt_qol_camera_clamp")->GetUINT32();
         m_hotkeyEnabled = real::GetApp()->GetVar("osgt_qol_quick_clamp")->GetUINT32();
-
+        m_overlayEnabled = real::GetApp()->GetVar("osgt_qol_overlay")->GetUINT32();
+        m_overlayOpacity =
+            (uint32_t)(real::GetApp()->GetVar("osgt_qol_overlay_opacity")->GetFloat() * 255.0f);
         // Our options, maybe they're better grouped together, but by categorization they should be
         // in UI and Input respectively.
         auto& optionsMgr = game::OptionsManager::get();
@@ -1249,6 +1257,10 @@ class AnchorCameraToPlayerPatch : public patch::BasePatch
         optionsMgr.addCheckboxOption("qol", "Input", "osgt_qol_quick_clamp",
                                      "Toggle centered camera with Ctrl+C hotkey",
                                      &OnHotkeyCallback);
+        optionsMgr.addCheckboxOption("qol", "UI", "osgt_qol_overlay", "World overlay",
+                                     &OnOverlayCallback);
+        optionsMgr.addSliderOption("qol", "UI", "osgt_qol_overlay_opacity", "Overlay opacity",
+                                   (game::VariantCallback)&OnOverlayOpacityCallback);
 
         // Subscribe to events for hotkeys
         auto& events = game::EventsAPI::get();
@@ -1271,6 +1283,18 @@ class AnchorCameraToPlayerPatch : public patch::BasePatch
         Entity* pCheckbox = pVariant->Get(1).GetEntity();
         m_hotkeyEnabled = pCheckbox->GetVar("checked")->GetUINT32() != 0;
         real::GetApp()->GetVar("osgt_qol_quick_clamp")->Set(uint32_t(m_hotkeyEnabled));
+    }
+    static void OnOverlayCallback(VariantList* pVariant)
+    {
+        Entity* pCheckbox = pVariant->Get(1).GetEntity();
+        m_overlayEnabled = pCheckbox->GetVar("checked")->GetUINT32() != 0;
+        real::GetApp()->GetVar("osgt_qol_overlay")->Set(uint32_t(m_overlayEnabled));
+    }
+    static void OnOverlayOpacityCallback(VariantList* pVariant)
+    {
+        float progress = pVariant->Get(0).GetFloat();
+        m_overlayOpacity = (uint32_t)(progress * 255.0f);
+        real::GetApp()->GetVar("osgt_qol_overlay_opacity")->Set(progress);
     }
 
     // Helper functions for amount of pixels drawn out of world bounds
@@ -1369,7 +1393,31 @@ class AnchorCameraToPlayerPatch : public patch::BasePatch
             }
         }
     }
-
+    static void WorldRendererDrawWorldBackground(WorldRenderer* this_)
+    {
+        real::WorldRendererDrawWorldBackground(this_);
+        if (m_overlayEnabled)
+        {
+            static SurfaceAnim s_overlayImage;
+            static bool s_loaded = false;
+            if (!s_loaded)
+            {
+                s_overlayImage.SetBlendingMode(Surface::BLENDING_PREMULTIPLIED_ALPHA);
+                s_overlayImage.LoadFile("game/overlay.rttex");
+                s_overlayImage.SetupAnim(1, 1);
+                s_loaded = true;
+            }
+            float x = -this_->m_worldCamera.m_position.x * this_->m_worldCamera.m_zoomLevel.x +
+                      (50 * 32 * this_->m_worldCamera.m_zoomLevel.x);
+            float y = -this_->m_worldCamera.m_position.y * this_->m_worldCamera.m_zoomLevel.y +
+                      (30 * 32 * this_->m_worldCamera.m_zoomLevel.y);
+            CL_Vec2f scale(3200.0f * this_->m_worldCamera.m_zoomLevel.x / s_overlayImage.GetWidth(),
+                           1920.0f * this_->m_worldCamera.m_zoomLevel.y /
+                               s_overlayImage.GetHeight());
+            s_overlayImage.BlitScaledAnim(x, y, 0, 0, &scale, 1,
+                                          MAKE_RGBA(255, 255, 255, m_overlayOpacity), 0.0);
+        }
+    }
     static CL_Vec2f* __fastcall WorldCameraGetCamWorldPos(WorldCamera* this_, CL_Vec2f* p2)
     {
         CL_Vec2f* res = real::WorldCameraGetCamWorldPos(this_, p2);
@@ -1451,9 +1499,13 @@ class AnchorCameraToPlayerPatch : public patch::BasePatch
     static bool m_centerCameraOnPlayer;
     static bool m_hotkeyEnabled;
     static int m_toggleKey;
+    static bool m_overlayEnabled;
+    static uint32_t m_overlayOpacity;
 };
 bool AnchorCameraToPlayerPatch::m_centerCameraOnPlayer = false;
 bool AnchorCameraToPlayerPatch::m_hotkeyEnabled = false;
+bool AnchorCameraToPlayerPatch::m_overlayEnabled = false;
+uint32_t AnchorCameraToPlayerPatch::m_overlayOpacity = 128;
 int AnchorCameraToPlayerPatch::m_toggleKey;
 REGISTER_USER_GAME_PATCH(AnchorCameraToPlayerPatch, anchor_camera_to_player);
 
@@ -1835,7 +1887,8 @@ class HotbarExpanded : public patch::BasePatch
             // Set right/jump button bottom paddings to none to prevent input leakage on hotbar,
             // also get rid of the annoyinging large right padding on arrows. This also makes
             // paddings equal between buttons.
-            if (doTouchButtonsNeedPaddings(pTouchRight)) {
+            if (doTouchButtonsNeedPaddings(pTouchRight))
+            {
                 float fPaddingRef = vJumpButtonSize.x / 4;
                 Rectf rPaddingRect;
                 rPaddingRect.left = 30.0f;
